@@ -1,0 +1,6 @@
+{
+  "name": "limit-bars",
+  "description": "Live 5-hour and 7-day rate-limit bars for Claude Code",
+  "owner": { "name": "AlexCherrypi" },
+  "plugins": [{ "name": "limit-bars", "source": "./" }]
+}
