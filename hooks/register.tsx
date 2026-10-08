@@ -112,28 +112,62 @@ function rows(list: Limit[], at: number): Row[] {
   }
   return out
 }
+// "5h ▰▰▰▱▱▱▱▱ 42% ↻13:00 (1h 10m) · 7d ▰▰▰▰▰▱▱▱ 63% ↻Mi 14.10. 02:00 (5d 14h)"
+function statusText(list: Row[]): string {
+  return list
+    .map(r => {
+      const filled = Math.round((Math.min(r.pct, 100) / 100) * 8)
+      const bar = '▰'.repeat(filled) + '▱'.repeat(8 - filled)
+      const reset = r.reset ? ` ↻${r.reset}${r.left ? ` (${r.left})` : ''}` : ''
+      return `${r.label} ${bar} ${Math.round(r.pct)}%${reset}`
+    })
+    .join(' · ')
+}
 
-export const register: Register = on => {
+type StatusMode = 'auto' | 'always' | 'off'
+
+let mode: StatusMode = 'auto'
+// Set once the band has drawn on a surface that has it (terminal, desktop): from
+// then on, in auto mode, the status line would only repeat it.
+let isBandShown = false
+let lastStatus: string | undefined
+
+async function refreshStatus($: EngineInterface): Promise<void> {
+  let text: string | undefined
+  if (mode === 'always' || (mode === 'auto' && !isBandShown)) {
+    const at = (await read($, now)) || (await $.clock.now())
+    const list = rows(await read($, limits), at)
+    text = list.length ? statusText(list) : undefined
+  }
+  if (text === lastStatus) return
+  lastStatus = text
+  $.ui.status(text)
+}
+
+async function refresh($: EngineInterface, list?: Limit[]): Promise<void> {
+  const at = await $.clock.now()
+  if (list) await update($, limits, () => list)
+  await update($, now, () => at)
+  await refreshStatus($)
+}
+
+export const register: Register = (on, options) => {
+  mode = options.statusLine === 'always' || options.statusLine === 'off' ? options.statusLine : 'auto'
+  isBandShown = false
+  lastStatus = undefined
+
   on('session.start', async ($, e, next) => {
     timeZone = await detectTimeZone($)
     const u = await safe(() => $.session.usage())
-    if (u) await update($, limits, () => u.rateLimits.map(r => ({ ...r })))
-    const t = await $.clock.now()
-    await update($, now, () => t)
+    await refresh($, u?.rateLimits.map(r => ({ ...r })))
     // A minute tick moves the countdown and drops a window past its reset.
-    $.clock.every(60_000, async () => {
-      const at = await $.clock.now()
-      await update($, now, () => at)
-    })
+    $.clock.every(60_000, () => refresh($))
     return next(e)
   })
 
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('rateLimits')) {
-      const list = e.rateLimits.map(r => ({ ...r }))
-      const at = await $.clock.now()
-      await update($, limits, () => list)
-      await update($, now, () => at)
+      await refresh($, e.rateLimits.map(r => ({ ...r })))
     }
     return next(e)
   })
@@ -143,6 +177,11 @@ export const register: Register = on => {
     const at = (await read($, now)) || (await $.clock.now())
     const list = rows(await read($, limits), at)
     if (list.length === 0) return next(e)
+
+    if (!isBandShown && (e.surface === 'terminal' || e.surface === 'desktop')) {
+      isBandShown = true
+      await refreshStatus($)
+    }
 
     const { Box, Text } = $.ui.resolve(e)
     const resetWidth = Math.max(...list.map(r => r.reset.length))

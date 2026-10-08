@@ -14,6 +14,18 @@ The figures come from the session itself (`session.measure`), so they move
 whenever a response reports new limits; a minute tick keeps the countdown going
 and drops a window to 0 % once its reset time has passed.
 
+Those bars are drawn in the terminal and in the desktop app's Code tab. Where
+they are not (VS Code, mobile, remote sessions), a compact status line under the
+prompt shows the same figures instead:
+
+```
+5h ▰▰▰▱▱▱▱▱ 41% ↻13:00 (1h 17m) · 7d ▰▰▰▰▰▱▱▱ 63% ↻Mi 14.10. 02:00 (5d 14h)
+```
+
+The `statusLine` option (in `/plugin` → limit-bars → configure) sets it: `auto`
+(default) shows it only until the bars have drawn, `always` keeps it beside the
+bars, `off` never shows it.
+
 ## Install
 
 ```
