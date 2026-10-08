@@ -21,7 +21,12 @@ and drops a window to 0 % once its reset time has passed.
 /plugin install limit-bars@limit-bars
 ```
 
-The repository is private, so the machine needs read access to it.
+or from the personal marketplace `alexcherrypi` (`AlexCherrypi/alexcherrypi-plugins`):
+
+```
+/plugin install limit-bars@alexcherrypi
+```
+
 
 ## Develop
 
