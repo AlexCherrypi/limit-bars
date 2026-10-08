@@ -195,6 +195,7 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
+        <Text> </Text>
         {list.map(r => {
           const filled = Math.min(barWidth, Math.round((Math.min(r.pct, 100) / 100) * barWidth))
           return (
@@ -208,7 +209,6 @@ export const register: Register = (on, options) => {
             </Box>
           )
         })}
-        <Text> </Text>
       </Box>
     )
   })
