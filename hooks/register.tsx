@@ -1,10 +1,10 @@
-import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Limit } from '../types'
+type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
-const limits = atom({ plugin: 'limit-bars', key: 'limits' } as const, [])
-const now = atom({ plugin: 'limit-bars', key: 'now' } as const, 0)
+// The latest figures and the time they were drawn for; a change redraws the band.
+let limits: Limit[] = []
+let now = 0
 
 const WINDOWS = [
   { kind: 'five_hour', label: '5h' },
@@ -138,8 +138,7 @@ let lastStatus: string | undefined
 async function refreshStatus($: EngineInterface): Promise<void> {
   let text: string | undefined
   if (display === 'little' || display === 'both' || (display === 'auto' && !isBandShown)) {
-    const at = (await read($, now)) || (await $.clock.now())
-    const list = rows(await read($, limits), at)
+    const list = rows(limits, now || (await $.clock.now()))
     text = list.length ? statusText(list) : undefined
   }
   if (text === lastStatus) return
@@ -148,9 +147,9 @@ async function refreshStatus($: EngineInterface): Promise<void> {
 }
 
 async function refresh($: EngineInterface, list?: Limit[]): Promise<void> {
-  const at = await $.clock.now()
-  if (list) await update($, limits, () => list)
-  await update($, now, () => at)
+  now = await $.clock.now()
+  if (list) limits = list
+  $.ui.invalidate('ui.render')
   await refreshStatus($)
 }
 
@@ -158,6 +157,8 @@ export const register: Register = (on, options) => {
   display = DISPLAYS.find(d => d === options.display) ?? 'auto'
   isBandShown = false
   lastStatus = undefined
+  limits = []
+  now = 0
 
   on('session.start', async ($, e, next) => {
     timeZone = await detectTimeZone($)
@@ -177,8 +178,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || display === 'little') return next(e)
-    const at = (await read($, now)) || (await $.clock.now())
-    const list = rows(await read($, limits), at)
+    const list = rows(limits, now || (await $.clock.now()))
     if (list.length === 0) return next(e)
 
     if (!isBandShown && (e.surface === 'terminal' || e.surface === 'desktop')) {

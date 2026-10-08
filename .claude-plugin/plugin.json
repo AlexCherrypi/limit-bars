@@ -1,11 +1,10 @@
 {
   "name": "limit-bars",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Shows the 5-hour and 7-day rate limits live as two bars above the prompt, with each window's reset time on the right.",
   "author": {
     "name": "AlexCherrypi"
   },
-  "types": "./types/index.d.ts",
   "userConfig": {
     "display": {
       "type": "string",
