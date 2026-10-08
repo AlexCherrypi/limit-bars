@@ -15,7 +15,7 @@ whenever a response reports new limits; a minute tick keeps the countdown going
 and drops a window to 0 % once its reset time has passed.
 
 Those big bars are drawn in the terminal and in the desktop app's Code tab,
-followed by an empty row that keeps them apart from the prompt. A little status
+with an empty row above them that keeps them apart from the transcript. A little status
 line under the prompt shows the same figures in one row:
 
 ```
