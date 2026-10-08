@@ -124,9 +124,12 @@ function statusText(list: Row[]): string {
     .join(' · ')
 }
 
-type StatusMode = 'auto' | 'always' | 'off'
+// auto: the big bars where they can be drawn (terminal, desktop), the little status
+// line everywhere else; big / little: only that one; both: both.
+type Display = 'auto' | 'big' | 'little' | 'both'
+const DISPLAYS: readonly Display[] = ['auto', 'big', 'little', 'both']
 
-let mode: StatusMode = 'auto'
+let display: Display = 'auto'
 // Set once the band has drawn on a surface that has it (terminal, desktop): from
 // then on, in auto mode, the status line would only repeat it.
 let isBandShown = false
@@ -134,7 +137,7 @@ let lastStatus: string | undefined
 
 async function refreshStatus($: EngineInterface): Promise<void> {
   let text: string | undefined
-  if (mode === 'always' || (mode === 'auto' && !isBandShown)) {
+  if (display === 'little' || display === 'both' || (display === 'auto' && !isBandShown)) {
     const at = (await read($, now)) || (await $.clock.now())
     const list = rows(await read($, limits), at)
     text = list.length ? statusText(list) : undefined
@@ -152,7 +155,7 @@ async function refresh($: EngineInterface, list?: Limit[]): Promise<void> {
 }
 
 export const register: Register = (on, options) => {
-  mode = options.statusLine === 'always' || options.statusLine === 'off' ? options.statusLine : 'auto'
+  display = DISPLAYS.find(d => d === options.display) ?? 'auto'
   isBandShown = false
   lastStatus = undefined
 
@@ -173,7 +176,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
+    if (e.props.hasSurvey || display === 'little') return next(e)
     const at = (await read($, now)) || (await $.clock.now())
     const list = rows(await read($, limits), at)
     if (list.length === 0) return next(e)
@@ -205,6 +208,7 @@ export const register: Register = (on, options) => {
             </Box>
           )
         })}
+        <Text> </Text>
       </Box>
     )
   })

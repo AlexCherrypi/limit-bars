@@ -85,7 +85,7 @@ describe('limit-bars', () => {
     expect(status.current).toContain('5h ▰▰▰▰▰▰▰▱ 92%')
   })
 
-  test('always: the status line stays beside the band', { options: { statusLine: 'always' } }, async ($, on) => {
+  test('both: the status line stays beside the band', { options: { display: 'both' } }, async ($, on) => {
     world(on)
     await $.session.start({ cwd: '/' } as never)
     const ui = await $.ui.mount({ plugin: 'limit-bars', surface: 'terminal', ...BAND } as never)
@@ -93,9 +93,23 @@ describe('limit-bars', () => {
     await ui.unmount()
   })
 
-  test('off: no status line', { options: { statusLine: 'off' } }, async ($, on) => {
+  test('big: no status line, only the bars', { options: { display: 'big' } }, async ($, on) => {
     world(on)
     await $.session.start({ cwd: '/' } as never)
     expect(status.current).toBeUndefined()
+    const ui = await $.ui.mount({ plugin: 'limit-bars', surface: 'terminal', ...BAND } as never)
+    expect(await ui.find({ type: 'Text', text: /41%/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('little: only the status line, no bars', { options: { display: 'little' } }, async ($, on) => {
+    world(on)
+    // The engine's own band beneath: nothing to show.
+    on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
+    await $.session.start({ cwd: '/' } as never)
+    const ui = await $.ui.mount({ plugin: 'limit-bars', surface: 'terminal', ...BAND } as never)
+    expect(await ui.find({ type: 'Text', text: /41%/ })).toBeUndefined()
+    expect(status.current).toContain('5h ▰▰▰▱▱▱▱▱ 41%')
+    await ui.unmount()
   })
 })

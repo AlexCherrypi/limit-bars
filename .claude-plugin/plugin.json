@@ -1,20 +1,21 @@
 {
   "name": "limit-bars",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shows the 5-hour and 7-day rate limits live as two bars above the prompt, with each window's reset time on the right.",
   "author": {
     "name": "AlexCherrypi"
   },
   "types": "./types/index.d.ts",
   "userConfig": {
-    "statusLine": {
+    "display": {
       "type": "string",
-      "title": "Status line",
-      "description": "auto = a compact status line only where the bars above the prompt are not drawn (VS Code, mobile, remote); always = in addition to the bars; off = never.",
+      "title": "Display",
+      "description": "auto = big bars above the prompt where they can be drawn (terminal, desktop Code tab), the little status line everywhere else; big = only the big bars; little = only the little status line; both = both.",
       "options": [
         "auto",
-        "always",
-        "off"
+        "big",
+        "little",
+        "both"
       ],
       "default": "auto"
     }
