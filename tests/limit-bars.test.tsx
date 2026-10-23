@@ -648,6 +648,51 @@ describe('limit-bars: the account and the server reading', () => {
     expect(status.current).toContain('12%')
   })
 
+  test('an older install keeps the account in ~/.claude/.config.json, which the engine goes by', OFF, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    const LEGACY = `${HOME}/.claude/.config.json`
+    login(seen, A, undefined, LEGACY)
+    login(seen, B) // ~/.claude.json is not the engine's here
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    seen.server.current = meter(12, 34)
+    login(seen, A)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(0)
+    login(seen, B, undefined, LEGACY)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1)
+    expect(status.current).toContain('12%')
+  })
+
+  test('an empty ~/.claude/.config.json beside ~/.claude.json is not the engine\'s', OFF, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    seen.files.set(`${HOME}/.claude/.config.json`, { text: '', mtimeMs: 1 })
+    login(seen, A)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    seen.server.current = meter(12, 34)
+    login(seen, B)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1)
+  })
+
+  test('with a custom OAuth URL the account is in ~/.claude-custom-oauth.json', OFF, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME, CLAUDE_CODE_CUSTOM_OAUTH_URL: 'https://login.example.com' })
+    const CUSTOM = `${HOME}/.claude-custom-oauth.json`
+    login(seen, A, undefined, CUSTOM)
+    login(seen, B)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    seen.server.current = meter(12, 34)
+    login(seen, A)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(0)
+    login(seen, B, undefined, CUSTOM)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1)
+  })
+
   test('on Windows the account file is in USERPROFILE, also where a shell sets HOME', OFF, async ($, on) => {
     const PROFILE = '/c/Users/u' // as the kit spells paths; the engine takes C:\Users\u as given
     const { clock, seen } = world(on, LIMITS, { HOME: '/home/u', USERPROFILE: PROFILE, OS: 'Windows_NT' })

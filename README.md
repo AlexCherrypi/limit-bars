@@ -21,12 +21,14 @@ The figures come from two places, and per window the newer one counts:
 
 **After an account switch** (a `/login` to another account, an account switcher)
 the bars show the new account's figures at once: every 2 seconds they look at
-`oauthAccount.accountUuid` in `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json`
-where that is set; a `stat`, read only when it changed). On a switch the old
+`oauthAccount.accountUuid` in `~/.claude.json` (a `stat`, read only when it
+changed) – or wherever Claude Code keeps it: `$CLAUDE_CONFIG_DIR/.claude.json`
+where that is set, an older install's `~/.claude/.config.json`. On a switch the old
 account's figures go at once and the new one's are read from the server right
 away; until they or the first response sent after the switch arrive, the bars stay
 empty rather than show the wrong account (a response to a request sent before the
-switch still carries the old account's limits, so it does not count). A failed
+switch still carries the old account's limits, so it does not count, nor does any
+other while such a request is out). A failed
 reading for the new account is tried again after 30 seconds, doubling. A file
 that is half written or gone for a moment is no switch, and a reading the account
 changed under is dropped.

@@ -226,15 +226,26 @@ function shown(): Limit[] {
   return out
 }
 
-// $CLAUDE_CONFIG_DIR/.claude.json, else the home folder's, as the engine finds it
-// (os.homedir(): USERPROFILE on Windows, also where a shell sets HOME).
+// The engine's global config, found as the engine finds it: an older install's
+// <$CLAUDE_CONFIG_DIR or ~/.claude>/.config.json while that holds anything, else
+// $CLAUDE_CONFIG_DIR/.claude.json or the home folder's (os.homedir(): USERPROFILE on
+// Windows, also where a shell sets HOME) – .claude-custom-oauth.json with a custom
+// OAuth URL.
 async function accountFile($: EngineInterface): Promise<string | null> {
   if (accountPath !== undefined) return accountPath
   const home = await safe(() => $.env.get('HOME'))
   const profile = await safe(() => $.env.get('USERPROFILE'))
   const isWindows = (await safe(() => $.env.get('OS'))) === 'Windows_NT'
-  const dir = (await safe(() => $.env.get('CLAUDE_CONFIG_DIR'))) || (isWindows ? profile || home : home || profile)
-  accountPath = dir ? `${dir.replace(/[\\/]+$/, '')}/.claude.json` : null
+  const homeDir = (isWindows ? profile || home : home || profile)?.replace(/[\\/]+$/, '')
+  const configDir = (await safe(() => $.env.get('CLAUDE_CONFIG_DIR')))?.replace(/[\\/]+$/, '')
+  const suffix = (await safe(() => $.env.get('CLAUDE_CODE_CUSTOM_OAUTH_URL'))) ? '-custom-oauth' : ''
+  const dir = configDir || homeDir
+  const current = dir ? `${dir}/.claude${suffix}.json` : null
+  const legacyDir = configDir || (homeDir ? `${homeDir}/.claude` : null)
+  const legacy = legacyDir ? `${legacyDir}/.config.json` : null
+  const st = legacy ? await safe(() => $.fs.stat(legacy)) : undefined
+  const isLegacy = st?.kind === 'file' && (st.size > 0 || !current || !(await safe(() => $.fs.stat(current))))
+  accountPath = isLegacy ? legacy : current
   return accountPath
 }
 
