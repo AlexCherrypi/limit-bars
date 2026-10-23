@@ -53,7 +53,17 @@ function world(on: On, rateLimits = LIMITS, env: Record<string, string> = {}) {
     runs: [] as Run[],
     // Called inside the second claude's run, before it answers.
     during: { current: undefined as (() => void) | undefined },
+    // How long the second claude and a model request take (on the mocked clock).
+    runMs: { current: 0 },
+    stepMs: { current: 0 },
+    // How the step ends, and what changes when its response lands.
+    stop: { current: 'end_turn' as string | null },
+    onLand: { current: undefined as (() => void) | undefined },
+    surfaces: { current: ['terminal'] as string[] },
+    // The status line while the second claude ran.
+    statusDuringRun: [] as (string | undefined)[],
   }
+  let clock: ReturnType<typeof mock.clock>
   mock.env(on, { TZ: 'Europe/Berlin', ...env })
   on('ui.status', (_$, e) => {
     status.current = e.text
@@ -72,26 +82,32 @@ function world(on: On, rateLimits = LIMITS, env: Record<string, string> = {}) {
     if (!f) throw new Error(`ENOENT ${e.path}`)
     return { value: f.text } as never
   })
-  on('process.run', (_$, e) => {
+  on('session.surfaces', () => ({ value: seen.surfaces.current }) as never)
+  on('process.run', async (_$, e) => {
     const run = e as unknown as Run
     seen.runs.push(run)
+    seen.statusDuringRun.push(status.current)
     seen.during.current?.()
     const answer = seen.server.current
+    if (seen.runMs.current) await clock.sleep(seen.runMs.current)
     return {
       value: answer === undefined ? { exitCode: 1, stdout: '', stderr: 'failed' } : { exitCode: 0, stdout: usageStdout(answer), stderr: '' },
     } as never
   })
   on('turn.step', async function* (_$, e) {
-    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: null } as never
+    if (seen.stepMs.current) await clock.sleep(seen.stepMs.current)
+    seen.onLand.current?.()
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: seen.stop.current, usage: null } as never
   })
-  return { clock: mock.clock(on, { now: NOW }), seen }
+  clock = mock.clock(on, { now: NOW })
+  return { clock, seen }
 }
 
 let mtime = 1
 // ~/.claude.json signed in as `uuid` (null: no claude.ai login), or `text` as written.
-function login(seen: ReturnType<typeof world>['seen'], uuid: string | null, text?: string) {
+function login(seen: ReturnType<typeof world>['seen'], uuid: string | null, text?: string, path = CONFIG) {
   const cfg = uuid ? { numStartups: 3, oauthAccount: { accountUuid: uuid, emailAddress: 'x@example.com' } } : { numStartups: 3 }
-  seen.files.set(CONFIG, { text: text ?? JSON.stringify(cfg), mtimeMs: mtime++ })
+  seen.files.set(path, { text: text ?? JSON.stringify(cfg), mtimeMs: mtime++ })
 }
 
 let stepIndex = 0
@@ -220,6 +236,9 @@ describe('limit-bars: the account and the server reading', () => {
     ])
     expect(run.init.env?.LIMIT_BARS_CHILD).toBe('1')
     expect(run.init.env?.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('')
+    // A key in the environment would win over the login in -p, which has no rate limits.
+    expect(run.init.env?.ANTHROPIC_API_KEY).toBe('')
+    expect(run.init.env?.ANTHROPIC_AUTH_TOKEN).toBe('')
   })
 
   test('the old account\'s figures go, also when the new one has none yet', OFF, async ($, on) => {
@@ -288,6 +307,8 @@ describe('limit-bars: the account and the server reading', () => {
     await clock.advance(1_000)
     await clock.advance(59 * 60_000)
     expect(fetches(seen)).toHaveLength(1)
+    await clock.advance(62_000)
+    expect(fetches(seen)).toHaveLength(2)
   })
 
   test('a file half written or gone for a moment is no switch', OFF, async ($, on) => {
@@ -325,6 +346,205 @@ describe('limit-bars: the account and the server reading', () => {
     await clock.advance(12_000)
     expect(fetches(seen)).toHaveLength(2)
     expect(status.current).toContain('5h ▱▱▱▱▱▱▱▱ 5%')
+  })
+
+  test('a response sent before a switch does not bring the old account back', { ...OFF, ...LONG }, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    login(seen, A)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    seen.stepMs.current = 20_000
+    const step = respond($) // A's request goes out
+    await clock.advance(2_000)
+    seen.server.current = meter(13, 35)
+    login(seen, B) // a /login in another window
+    await clock.advance(6_000)
+    expect(status.current).toContain('13%')
+    await clock.advance(13_000)
+    await step // A's response lands, its headers still A's
+    expect(status.current).toContain('13%')
+    expect(status.current).not.toContain('41%')
+    await clock.advance(10 * 60_000)
+    expect(status.current).toContain('13%')
+
+    // The first response sent under B brings B's own figures.
+    seen.stepMs.current = 0
+    seen.own.current = [{ ...LIMITS[0]!, percentUsed: 14 }, LIMITS[1]!]
+    await respond($)
+    expect(status.current).toContain('5h ▰▱▱▱▱▱▱▱ 14%')
+  })
+
+  test('a step without a response after a switch keeps the old figures away', OFF, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    login(seen, A)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    login(seen, B) // the second claude fails
+    await clock.advance(2_000)
+    seen.stop.current = null
+    await respond($)
+    expect(status.current).toBeUndefined()
+  })
+
+  test('the old figures go at once, before the new account is read', OFF, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    login(seen, A)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    seen.runMs.current = 3_000
+    seen.server.current = meter(12, 34)
+    login(seen, B)
+    await clock.advance(2_000)
+    expect(seen.statusDuringRun).toEqual([undefined])
+    await clock.advance(3_000)
+    expect(status.current).toContain('12%')
+  })
+
+  test('a switch seen only after an idle reading is drawn at once', async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    login(seen, A)
+    seen.server.current = meter(50, 70)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(1_000)
+    expect(status.current).toContain('50%')
+    // The next idle reading: the account changes while the second claude runs.
+    seen.during.current = () => {
+      seen.during.current = undefined
+      login(seen, B)
+      seen.server.current = undefined // and B's reading fails
+    }
+    await clock.advance(5 * 60_000)
+    expect(fetches(seen)).toHaveLength(2)
+    expect(status.current).toBeUndefined()
+  })
+
+  test("the old account's server reading is never shown for the new one", async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    login(seen, A)
+    seen.server.current = meter(50, 70)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(1_000)
+    expect(status.current).toContain('50%')
+    seen.server.current = undefined
+    login(seen, B)
+    await clock.advance(2_000)
+    expect(status.current).toBeUndefined() // at once, while the next reading waits its 10 s
+    await clock.advance(10_000)
+    expect(fetches(seen)).toHaveLength(2)
+    expect(status.current).toBeUndefined()
+  })
+
+  test("a response after an idle reading is drawn at once", async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    login(seen, A)
+    seen.server.current = meter(50, 70)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(1_000)
+    expect(status.current).toContain('50%')
+    await clock.advance(2 * 60_000)
+    // As the engine does it: the measure while the response comes in, then the step's end.
+    seen.own.current = [{ ...LIMITS[0]!, percentUsed: 53 }, LIMITS[1]!]
+    await $.session.measure({ context: { window: 1_000_000 }, rateLimits: seen.own.current, changed: ['rateLimits'] } as never)
+    await respond($)
+    expect(status.current).toContain('53%')
+  })
+
+  test('a failed reading for a new account is tried again within a minute, also with off', { ...OFF, ...LONG }, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    login(seen, A)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    seen.server.current = 'unreached' // 429 with nothing cached
+    login(seen, B)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1)
+    seen.server.current = meter(12, 34)
+    await clock.advance(32_000)
+    expect(fetches(seen)).toHaveLength(2)
+    expect(status.current).toContain('12%')
+    await clock.advance(30 * 60_000)
+    expect(fetches(seen)).toHaveLength(2) // off: then nothing more
+  })
+
+  test('a switch during the hour-long wait after a login without rate limits is read at once', LONG, async ($, on) => {
+    const { clock, seen } = world(on, [], { HOME })
+    login(seen, A)
+    seen.server.current = null
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(1_000)
+    expect(fetches(seen)).toHaveLength(1)
+    await clock.advance(10 * 60_000)
+    seen.server.current = meter(12, 34)
+    login(seen, B)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(2)
+    expect(status.current).toContain('12%')
+  })
+
+  test('failures back off 5, then 10 minutes', LONG, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    login(seen, A) // the second claude fails
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(1_000)
+    expect(fetches(seen)).toHaveLength(1)
+    await clock.advance(5 * 60_000 + 2_000)
+    expect(fetches(seen)).toHaveLength(2)
+    await clock.advance(9 * 60_000)
+    expect(fetches(seen)).toHaveLength(2)
+    await clock.advance(62_000)
+    expect(fetches(seen)).toHaveLength(3)
+  })
+
+  test('reading 15: idle, every 15 minutes', { options: { reading: '15' }, ...LONG }, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    login(seen, A)
+    seen.server.current = meter(50, 70)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(1_000)
+    expect(fetches(seen)).toHaveLength(1)
+    await clock.advance(14 * 60_000)
+    expect(fetches(seen)).toHaveLength(1)
+    await clock.advance(62_000)
+    expect(fetches(seen)).toHaveLength(2)
+  })
+
+  test('nothing is read where nothing draws (-p, the SDK)', LONG, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    seen.surfaces.current = []
+    login(seen, A)
+    seen.server.current = meter(50, 70)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(10 * 60_000)
+    expect(fetches(seen)).toHaveLength(0)
+  })
+
+  test('CLAUDE_CONFIG_DIR holds the account file', OFF, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME, CLAUDE_CONFIG_DIR: '/cfg' })
+    login(seen, A, undefined, '/cfg/.claude.json')
+    login(seen, B) // ~/.claude.json is not the engine's here
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    seen.server.current = meter(12, 34)
+    login(seen, A) // nothing changes for the session
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(0)
+    login(seen, B, undefined, '/cfg/.claude.json')
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1)
+    expect(status.current).toContain('12%')
+  })
+
+  test('on Windows the account file is in USERPROFILE, also where a shell sets HOME', OFF, async ($, on) => {
+    const PROFILE = '/c/Users/u' // as the kit spells paths; the engine takes C:\Users\u as given
+    const { clock, seen } = world(on, LIMITS, { HOME: '/home/u', USERPROFILE: PROFILE, OS: 'Windows_NT' })
+    login(seen, A, undefined, `${PROFILE}/.claude.json`)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    seen.server.current = meter(12, 34)
+    login(seen, B, undefined, `${PROFILE}/.claude.json`)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1)
+    expect(status.current).toContain('12%')
   })
 
   test('without a claude.ai login nothing is asked', async ($, on) => {

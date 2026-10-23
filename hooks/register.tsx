@@ -175,6 +175,7 @@ const USAGE_MIN_GAP_MS = 10_000 // between two readings, also when the account f
 const USAGE_MAX_AGE_MS = 10 * 60_000 // an answer older than this is the engine's cache
 const USAGE_SNAPSHOT_MS = 60_000 // the engine answers get_usage from a snapshot up to this old, as fresh
 const USAGE_BACKOFF_MS = 5 * 60_000 // after a failed reading, doubling each time
+const USAGE_SWITCH_RETRY_MS = 30_000 // after a failed reading for a new account, doubling each time
 const USAGE_BACKOFF_MAX_MS = 60 * 60_000
 // Set in the second claude's environment: a limit-bars loaded there stays still.
 const CHILD_MARKER = 'LIMIT_BARS_CHILD'
@@ -219,13 +220,14 @@ function shown(): Limit[] {
   return out
 }
 
-// $CLAUDE_CONFIG_DIR/.claude.json, else the home folder's.
+// $CLAUDE_CONFIG_DIR/.claude.json, else the home folder's, as the engine finds it
+// (os.homedir(): USERPROFILE on Windows, also where a shell sets HOME).
 async function accountFile($: EngineInterface): Promise<string | null> {
   if (accountPath !== undefined) return accountPath
-  const dir =
-    (await safe(() => $.env.get('CLAUDE_CONFIG_DIR'))) ||
-    (await safe(() => $.env.get('HOME'))) ||
-    (await safe(() => $.env.get('USERPROFILE')))
+  const home = await safe(() => $.env.get('HOME'))
+  const profile = await safe(() => $.env.get('USERPROFILE'))
+  const isWindows = (await safe(() => $.env.get('OS'))) === 'Windows_NT'
+  const dir = (await safe(() => $.env.get('CLAUDE_CONFIG_DIR'))) || (isWindows ? profile || home : home || profile)
   accountPath = dir ? `${dir.replace(/[\\/]+$/, '')}/.claude.json` : null
   return accountPath
 }
@@ -321,8 +323,16 @@ async function fetchUsage($: EngineInterface): Promise<UsageAnswer> {
       ],
       {
         stdin: `${JSON.stringify({ type: 'control_request', request_id: 'limit-bars', request: { subtype: 'get_usage', skip_behaviors: true } })}\n`,
-        // Set, the fetch fails silently and the answer falls back to the cache.
-        env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '', CLAUDE_CODE_PLUGIN_DIRS: '', [CHILD_MARKER]: '1' },
+        env: {
+          // Set, the fetch fails silently and the answer falls back to the cache.
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '',
+          // Without a prompt to decline it, -p would take a key from the environment
+          // over the claude.ai login and answer that it has no rate limits.
+          ANTHROPIC_API_KEY: '',
+          ANTHROPIC_AUTH_TOKEN: '',
+          CLAUDE_CODE_PLUGIN_DIRS: '',
+          [CHILD_MARKER]: '1',
+        },
         timeoutMs: USAGE_TIMEOUT_MS,
       },
     )
@@ -355,33 +365,46 @@ async function takeReading($: EngineInterface): Promise<void> {
   const r = await fetchUsage($)
   // An answer that may be the account's before a switch is dropped; the switch reads again.
   if ((await checkAccount($)) || account !== forAccount) return
-  switchPending = false
   if ('limits' in r) {
     // Dated when it was asked for: it may come from a snapshot taken a little before.
     reading = { at: asked, account: forAccount, limits: r.limits }
+    switchPending = false
     failures = 0
     backoffUntil = 0
     return
   }
+  // A new account's reading is tried again soon (the bars wait empty for it), any
+  // other later; a login without rate limits only after an hour.
   failures += 1
-  const wait = r.final ? USAGE_BACKOFF_MAX_MS : Math.min(USAGE_BACKOFF_MAX_MS, USAGE_BACKOFF_MS * 2 ** (failures - 1))
+  if (r.final) switchPending = false
+  const first = switchPending ? USAGE_SWITCH_RETRY_MS : USAGE_BACKOFF_MS
+  const wait = r.final ? USAGE_BACKOFF_MAX_MS : Math.min(USAGE_BACKOFF_MAX_MS, first * 2 ** (failures - 1))
   backoffUntil = (await $.clock.now()) + wait
 }
 
-// The watch: a look at the account file, a reading when one is due, then the bars.
+// The watch: a look at the account file, a reading when one is due, then the bars. A
+// switch hides the old account's figures at once, before the new one's are read, also
+// when only the look after a reading saw it. A session that draws nowhere (-p, the SDK)
+// is not read for.
 async function watchTick($: EngineInterface): Promise<void> {
   if (ticking) return
   ticking = true
   try {
-    const switched = await checkAccount($)
+    if (await checkAccount($)) await refresh($)
+    const switchedAt = accountSwitchedAt
     const had = reading
-    if (isReadingDue(await $.clock.now())) await takeReading($)
-    if (switched || reading !== had) await refresh($)
+    if (isReadingDue(await $.clock.now()) && (await draws($))) await takeReading($)
+    if (reading !== had || accountSwitchedAt !== switchedAt) await refresh($)
   } catch {
     // the next look tries again
   } finally {
     ticking = false
   }
+}
+
+async function draws($: EngineInterface): Promise<boolean> {
+  const surfaces = await safe(() => $.session.surfaces())
+  return surfaces === undefined || surfaces.length > 0
 }
 
 export const register: Register = (on, options) => {
@@ -428,17 +451,21 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // A response came: the host's figures are from now, and after a switch they are the new account's.
+  // A response came: the host's figures are from now, and after a switch they are the new
+  // account's. A request sent before the switch went out under the old account, so its
+  // response leaves the figures as they are.
   on('turn.step', async function* ($, e, next) {
+    const sentAt = await $.clock.now()
     const r = yield* next(e)
-    if (r.stopReason !== null) {
+    if (r.stopReason !== null && sentAt >= accountSwitchedAt) {
       const isFirstAfterSwitch = accountSwitchedAt > lastResponseAt
       lastResponseAt = await $.clock.now()
       if (isFirstAfterSwitch) {
         const u = await safe(() => $.session.usage())
         if (u) own = u.rateLimits.map(l => ({ ...l }))
-        await refresh($)
       }
+      // An older server reading may have counted over them until now.
+      await refresh($)
     }
     return r
   })
