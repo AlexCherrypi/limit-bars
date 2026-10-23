@@ -170,7 +170,7 @@ async function refresh($: EngineInterface): Promise<void> {
 // overruns in a row get the hooks worker replaced. The watch timer takes every
 // reading.
 
-const WATCH_MS = 2_000 // how often ~/.claude.json is looked at (a stat; read only when it changed)
+const WATCH_MS = 1_000 // how often ~/.claude.json is looked at (a stat; read only when it changed)
 const USAGE_TIMEOUT_MS = 10_000
 const USAGE_MIN_GAP_MS = 10_000 // between two readings, also when the account flips back and forth
 const USAGE_MAX_AGE_MS = 10 * 60_000 // an answer older than this is the engine's cache
