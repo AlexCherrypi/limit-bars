@@ -31,7 +31,9 @@ switch still carries the old account's limits, so it does not count, nor does an
 other while such a request is out). A failed
 reading for the new account is tried again after 30 seconds, doubling. A file
 that is half written or gone for a moment is no switch, and a reading the account
-changed under is dropped.
+changed under is dropped. What the watch knows is kept for the session, so a
+changed option (which reloads the mod) or a replaced hooks worker does not forget
+a switch whose new account has not answered yet.
 
 The server is never asked without a claude.ai login (API key, cloud provider), nor
 in a session that draws nowhere (`claude -p`, the SDK), nor with

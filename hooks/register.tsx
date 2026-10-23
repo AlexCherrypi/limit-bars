@@ -1,4 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
+import type { KeptAccount } from '../types'
 
 type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
@@ -279,12 +280,51 @@ async function checkAccount($: EngineInterface): Promise<boolean> {
   if (seen === undefined) return false
   const before = account
   account = seen
-  if (before === undefined || before === seen) return false
+  if (before === seen) return false
+  if (before === undefined) {
+    await keep($)
+    return false
+  }
   accountSwitchedAt = await $.clock.now()
   switchPending = seen !== null
   failures = 0
   backoffUntil = 0
+  await keep($)
   return true
+}
+
+const KEPT = { plugin: 'limit-bars', key: 'account' } as const
+
+// What a fresh copy of the module needs of the account watch, kept for the session.
+async function keep($: EngineInterface): Promise<void> {
+  const session = await safe(() => $.session.id())
+  if (!session || account === undefined) return
+  const r = reading
+  const kept: KeptAccount = {
+    session,
+    account,
+    waiting: accountSwitchedAt > lastResponseAt,
+    switchPending,
+    reading: r && typeof r.account === 'string' ? { at: r.at, account: r.account, limits: r.limits.map(l => ({ ...l })) } : null,
+  }
+  await safe(() => $.state.set(KEPT, kept))
+}
+
+// What the previous copy kept for this session: the account it knew (so a switch while
+// none ran is still seen), whether the new account's figures were still awaited, and the
+// last reading.
+async function restore($: EngineInterface): Promise<void> {
+  const session = await safe(() => $.session.id())
+  const kept = (await safe(() => $.state.get(KEPT)))?.value as Partial<KeptAccount> | undefined
+  if (!session || kept?.session !== session || account !== undefined) return
+  if (typeof kept.account !== 'string' && kept.account !== null) return
+  account = kept.account
+  if (kept.waiting === true) accountSwitchedAt = await $.clock.now()
+  switchPending = kept.switchPending === true
+  const r = kept.reading
+  if (r && typeof r.at === 'number' && typeof r.account === 'string' && Array.isArray(r.limits)) {
+    reading = { at: r.at, account: r.account, limits: r.limits.map(l => ({ ...l })) }
+  }
 }
 
 // An ISO time or epoch seconds / milliseconds -> ms; null when it is none.
@@ -419,12 +459,16 @@ async function takeReading($: EngineInterface): Promise<void> {
     switchPending = false
     failures = 0
     backoffUntil = 0
+    await keep($)
     return
   }
   // A new account's reading is tried again soon (the bars wait empty for it), any
   // other later; a login without rate limits only after an hour.
   failures += 1
-  if (r.final) switchPending = false
+  if (r.final && switchPending) {
+    switchPending = false
+    await keep($)
+  }
   const first = switchPending ? USAGE_SWITCH_RETRY_MS : USAGE_BACKOFF_MS
   const wait = r.final ? USAGE_BACKOFF_MAX_MS : Math.min(USAGE_BACKOFF_MAX_MS, first * 2 ** (failures - 1))
   backoffUntil = (await $.clock.now()) + wait
@@ -485,6 +529,7 @@ export const register: Register = (on, options) => {
     timers = []
     if ((await safe(() => $.env.get('LIMIT_BARS_CHILD'))) !== undefined) return next(e)
     interactive = e.isInteractive === true
+    await restore($)
     timeZone = await detectTimeZone($)
     const u = await safe(() => $.session.usage())
     own = u?.rateLimits.map(r => ({ ...r })) ?? []
@@ -519,6 +564,7 @@ export const register: Register = (on, options) => {
           switchPending = false // the new account's figures are in
           const u = await safe(() => $.session.usage())
           if (u) own = u.rateLimits.map(l => ({ ...l }))
+          await keep($)
         }
         // An older server reading may have counted over them until now.
         await refresh($)

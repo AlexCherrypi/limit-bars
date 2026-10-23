@@ -5,6 +5,7 @@
   "author": {
     "name": "AlexCherrypi"
   },
+  "types": "./types/index.d.ts",
   "userConfig": {
     "display": {
       "type": "string",

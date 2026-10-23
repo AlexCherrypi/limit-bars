@@ -282,6 +282,71 @@ describe('limit-bars: the account and the server reading', () => {
     expect(status.current).toContain('14%') // the session's own
   })
 
+  test('the account watch is kept for the session', OFF, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    on('session.id', () => ({ value: 'sess-1' }) as never)
+    const writes: unknown[] = []
+    on('state.set', (_$, e, next) => {
+      if ((e as unknown as { key: string }).key === 'account') writes.push((e as unknown as { value: unknown }).value)
+      return next(e)
+    })
+    login(seen, A)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    expect(writes.at(-1)).toEqual({ session: 'sess-1', account: A, waiting: false, switchPending: false, reading: null })
+    login(seen, B) // the second claude fails
+    await clock.advance(2_000)
+    expect(writes.at(-1)).toEqual({ session: 'sess-1', account: B, waiting: true, switchPending: true, reading: null })
+    await respond($)
+    expect(writes.at(-1)).toEqual({ session: 'sess-1', account: B, waiting: false, switchPending: false, reading: null })
+  })
+
+  const kept = (on: On, value: Record<string, unknown>) => {
+    on('session.id', () => ({ value: 'sess-1' }) as never)
+    on('state.get', (_$, e, next) => {
+      if ((e as unknown as { key: string }).key !== 'account') return next(e)
+      return { value: { value: { session: 'sess-1', switchPending: false, reading: null, ...value }, version: 1 } } as never
+    })
+  }
+
+  test('a fresh copy of the module still waits for the new account after a reload', OFF, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME }) // the host still holds A's figures
+    kept(on, { account: B, waiting: true, switchPending: true })
+    login(seen, B)
+    await $.session.start({ cwd: '/' } as never) // a changed option reloaded the mod
+    expect(status.current ?? '').not.toContain('41%')
+    seen.server.current = meter(12, 34)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1) // the new account is read at once, as before the reload
+    expect(status.current).toContain('12%')
+  })
+
+  test('a switch while no copy of the module ran is still seen', OFF, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    kept(on, { account: A, waiting: false })
+    login(seen, B)
+    await $.session.start({ cwd: '/' } as never)
+    seen.server.current = meter(12, 34)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1)
+    expect(status.current).toContain('12%')
+    expect(status.current).not.toContain('41%')
+  })
+
+  test("another session's kept account is not taken", OFF, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    on('session.id', () => ({ value: 'sess-2' }) as never)
+    on('state.get', (_$, e, next) => {
+      if ((e as unknown as { key: string }).key !== 'account') return next(e)
+      return { value: { value: { session: 'sess-1', account: A, waiting: false, switchPending: false, reading: null }, version: 1 } } as never
+    })
+    login(seen, B)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(0) // no switch: this session started on B
+    expect(status.current).toContain('41%')
+  })
+
   test('a session on an apiKeyHelper reads no limits from the server', async ($, on) => {
     const { clock, seen } = world(on, [], { HOME })
     on('settings.read', () => ({ value: { apiKeyHelper: '~/bin/anthropic-key.sh' } }) as never)
