@@ -220,7 +220,7 @@ describe('limit-bars: the account and the server reading', () => {
 
     seen.server.current = meter(12, 34)
     login(seen, B)
-    await clock.advance(2_000)
+    await clock.advance(1_000) // the account file is looked at every second
     expect(fetches(seen)).toHaveLength(1)
     expect(status.current).toContain('5h ▰▱▱▱▱▱▱▱ 12%')
     expect(status.current).toContain('34%')

@@ -20,7 +20,7 @@ The figures come from two places, and per window the newer one counts:
   about 3 s). So usage from other sessions and devices shows as well.
 
 **After an account switch** (a `/login` to another account, an account switcher)
-the bars show the new account's figures at once: every 2 seconds they look at
+the bars show the new account's figures at once: every second they look at
 `oauthAccount.accountUuid` in `~/.claude.json` (a `stat`, read only when it
 changed) – or wherever Claude Code keeps it: `$CLAUDE_CONFIG_DIR/.claude.json`
 where that is set, an older install's `.config.json` in `$CLAUDE_CONFIG_DIR` or
