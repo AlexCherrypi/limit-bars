@@ -23,12 +23,13 @@ The figures come from two places, and per window the newer one counts:
 the bars show the new account's figures at once: every 2 seconds they look at
 `oauthAccount.accountUuid` in `~/.claude.json` (a `stat`, read only when it
 changed) – or wherever Claude Code keeps it: `$CLAUDE_CONFIG_DIR/.claude.json`
-where that is set, an older install's `~/.claude/.config.json`. On a switch the old
-account's figures go at once and the new one's are read from the server right
-away; until they or the first response sent after the switch arrive, the bars stay
-empty rather than show the wrong account (a response to a request sent before the
-switch still carries the old account's limits, so it does not count, nor does any
-other while such a request is out). A failed
+where that is set, an older install's `.config.json` in `$CLAUDE_CONFIG_DIR` or
+`~/.claude`, `.claude-custom-oauth.json` with `CLAUDE_CODE_CUSTOM_OAUTH_URL`. On a
+switch the old account's figures go at once and the new one's are read from the
+server right away; until they or a response that counts arrive, the bars stay
+empty rather than show the wrong account. A response counts only when its request
+went out after the switch and after every request from before it had come back:
+those went out under the old account, and their headers bring its limits. A failed
 reading for the new account is tried again after 30 seconds, doubling. A file
 that is half written or gone for a moment is no switch, and a reading the account
 changed under is dropped. What the watch knows is kept for the session, so a
@@ -49,9 +50,12 @@ gets it empty. Claude Code takes the key in a session with you at the prompt
 (terminal, VS Code) only once you approved it, and in `-p` and the SDK as it is.
 limit-bars tells which by the key's last 20 characters against
 `customApiKeyResponses.approved` in `~/.claude.json`, the way Claude Code does; the
-key itself is read for nothing else and goes nowhere. With an `apiKeyHelper` in your
-settings the session runs on its key, which the second `claude` (reading no
-settings) would not: then the server is not asked.
+key itself is read for nothing else and goes nowhere; where that file cannot be read,
+nothing is guessed and the reading waits for the usual back-off. With an
+`apiKeyHelper` in your settings the session runs on its key, which the second
+`claude` (reading no settings) would not: then the server is not asked – except in
+the desktop app, a local agent and a remote session, where Claude Code's own login
+wins over the helper.
 
 Those big bars are drawn in the terminal and in the desktop app's Code tab,
 with an empty row above them that keeps them apart from the transcript. A little status

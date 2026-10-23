@@ -374,29 +374,47 @@ function parseUsage(stdout: string, at: number): UsageAnswer {
 
 // Whether the session itself runs on the API key in the environment, which the host
 // picks this way: -p and the SDK take it as it is (not under VS Code), a session with a
-// person at the prompt only once they let it. Not read yet, as if they did.
-async function sessionUsesKey($: EngineInterface, key: string): Promise<boolean> {
+// person at the prompt only once they let it. undefined while the file could not be read.
+async function sessionUsesKey($: EngineInterface, key: string): Promise<boolean | undefined> {
   if (!interactive && (await safe(() => $.env.get('CLAUDE_CODE_ENTRYPOINT'))) !== 'claude-vscode') return true
-  return approvedKeys === undefined || approvedKeys.includes(key.slice(-20))
+  return approvedKeys === undefined ? undefined : approvedKeys.includes(key.slice(-20))
+}
+
+// Why the server is not read in this session at all, or null.
+// - The usage meter is traffic Claude Code counts as nonessential. Where the person turned
+//   that off, the child would read it only with the setting undone, and send everything
+//   else nonessential with it.
+// - An apiKeyHelper in the settings: the session runs on its key, not on the claude.ai
+//   login, which the child – reading no settings – would read the limits of. The engine
+//   counts the helper everywhere but in the desktop app, a local agent and a remote
+//   session, where the host's login wins – unless the host hands in auth of its own (the
+//   3p desktop app, CLAUDE_CODE_HOST_AUTH_ENV_VAR) without managing the provider.
+async function serverOff($: EngineInterface): Promise<string | null> {
+  if (await safe(() => $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'))) {
+    return 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set, and the usage meter is nonessential traffic'
+  }
+  if (!(await safe(() => $.settings.read({ key: 'apiKeyHelper' })))) return null
+  const entrypoint = (await safe(() => $.env.get('CLAUDE_CODE_ENTRYPOINT'))) ?? ''
+  const hosted = !!(await safe(() => $.env.get('CLAUDE_CODE_REMOTE'))) || ['claude-desktop', 'claude-desktop-3p', 'local-agent'].includes(entrypoint)
+  const helperCounts =
+    !hosted ||
+    ((!!(await safe(() => $.env.get('CLAUDE_CODE_HOST_AUTH_ENV_VAR'))) || entrypoint === 'claude-desktop-3p') &&
+      !(await safe(() => $.env.get('CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST'))))
+  return helperCounts ? 'the session runs on an apiKeyHelper, which has no rate limits to read' : null
 }
 
 async function fetchUsage($: EngineInterface): Promise<UsageAnswer> {
   const exe = (await safe(() => $.env.get('CLAUDE_CODE_EXECPATH'))) || 'claude'
-  // The usage meter is traffic Claude Code counts as nonessential: where the person turned
-  // that off, it is not read (the child would read it only with the setting undone, and
-  // send everything else nonessential with it).
-  if (await safe(() => $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'))) {
-    return { error: 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set, and the usage meter is nonessential traffic', final: true }
-  }
-  // An apiKeyHelper in the settings: the session runs on its key, not on the claude.ai
-  // login, which the child – reading no settings – would read the limits of.
-  if (await safe(() => $.settings.read({ key: 'apiKeyHelper' }))) {
-    return { error: 'the session runs on an apiKeyHelper, which has no rate limits to read', final: true }
-  }
+  const off = await serverOff($)
+  if (off) return { error: off, final: true }
   // -p would take a key from the environment over the claude.ai login the session runs
   // on, and answer that there are no rate limits.
   const key = (await safe(() => $.env.get('ANTHROPIC_API_KEY')))?.trim()
-  const dropKey = !!key && !(await sessionUsesKey($, key))
+  const usesKey = key ? await sessionUsesKey($, key) : true
+  if (usesKey === undefined) {
+    return { error: 'the global config cannot be read, so it is not known whether the session runs on ANTHROPIC_API_KEY' }
+  }
+  const dropKey = !usesKey
   try {
     const r = await $.process.run(
       [
@@ -571,8 +589,10 @@ export const register: Register = (on, options) => {
       }
       return r
     } finally {
+      // Gone from stepsOut only once oldStepBackAt holds it, with no wait in between.
+      const back = await safe(() => $.clock.now())
       stepsOut.delete(step)
-      if (sentAt < accountSwitchedAt) oldStepBackAt = await $.clock.now()
+      if (sentAt < accountSwitchedAt) oldStepBackAt = Math.max(oldStepBackAt, back ?? sentAt)
     }
   })
 

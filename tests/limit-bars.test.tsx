@@ -358,6 +358,29 @@ describe('limit-bars: the account and the server reading', () => {
     expect(status.current).toBeUndefined()
   })
 
+  test('in the desktop app the host\'s login wins over an apiKeyHelper, so the server is read', async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME, CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' })
+    on('settings.read', () => ({ value: { apiKeyHelper: '~/bin/anthropic-key.sh' } }) as never)
+    seen.server.current = meter(12, 34)
+    login(seen, A)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1)
+  })
+
+  test('where the approvals cannot be read, the key is not guessed at', LONG, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME, ANTHROPIC_API_KEY: KEY })
+    seen.server.current = meter(12, 34)
+    seen.files.set(CONFIG, { text: '{"oauthAccount": {"accountUuid"', mtimeMs: 1 }) // half written, never whole
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true } as never)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(0) // no child that would answer 'no rate limits' for an hour
+    withKeys(seen, [], [KEY.slice(-20)])
+    await clock.advance(5 * 60_000) // the usual back-off, not an hour
+    expect(fetches(seen)).toHaveLength(1)
+    expect(fetches(seen)[0]!.init.env?.ANTHROPIC_API_KEY).toBe('')
+  })
+
   test('under VS Code the key counts only once approved, as in the terminal', async ($, on) => {
     const { clock, seen } = world(on, LIMITS, { HOME, ANTHROPIC_API_KEY: KEY, CLAUDE_CODE_ENTRYPOINT: 'claude-vscode' })
     seen.server.current = meter(12, 34)
