@@ -235,7 +235,7 @@ describe('limit-bars: the account and the server reading', () => {
       '--no-session-persistence', '--strict-mcp-config', '--setting-sources', '',
     ])
     expect(run.init.env?.LIMIT_BARS_CHILD).toBe('1')
-    expect(run.init.env?.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('')
+    expect(run.init.env).not.toHaveProperty('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')
     // No key in the environment: nothing to leave out. A token the session runs on, as the child does.
     expect(run.init.env).not.toHaveProperty('ANTHROPIC_API_KEY')
     expect(run.init.env).not.toHaveProperty('ANTHROPIC_AUTH_TOKEN')
@@ -266,6 +266,20 @@ describe('limit-bars: the account and the server reading', () => {
     await clock.advance(5 * 60_000)
     expect(fetches(seen)).toHaveLength(3)
     expect(lastEnv()).not.toHaveProperty('ANTHROPIC_API_KEY') // -p and the SDK take it as it is
+  })
+
+  test('with nonessential traffic turned off the server is not asked', async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
+    seen.server.current = meter(12, 34)
+    login(seen, A)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    login(seen, B)
+    await clock.advance(30 * 60_000)
+    expect(fetches(seen)).toHaveLength(0)
+    seen.own.current = [{ ...LIMITS[0]!, percentUsed: 14 }, LIMITS[1]!]
+    await respond($)
+    expect(status.current).toContain('14%') // the session's own
   })
 
   test('a session on an apiKeyHelper reads no limits from the server', async ($, on) => {

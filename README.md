@@ -34,7 +34,9 @@ that is half written or gone for a moment is no switch, and a reading the accoun
 changed under is dropped.
 
 The server is never asked without a claude.ai login (API key, cloud provider), nor
-in a session that draws nowhere (`claude -p`, the SDK). An answer from the
+in a session that draws nowhere (`claude -p`, the SDK), nor with
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set: Claude Code counts the usage meter
+as nonessential traffic, and the bars then go by the session's own figures. An answer from the
 engine's cache counts as no reading, and a failed one backs off (5 minutes,
 doubling up to an hour; a login without rate limits an hour). A minute tick keeps
 the countdown going and drops a window to 0 % once its reset time has passed.
