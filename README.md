@@ -43,7 +43,9 @@ gets it empty. Claude Code takes the key in a session with you at the prompt
 (terminal, VS Code) only once you approved it, and in `-p` and the SDK as it is.
 limit-bars tells which by the key's last 20 characters against
 `customApiKeyResponses.approved` in `~/.claude.json`, the way Claude Code does; the
-key itself is read for nothing else and goes nowhere.
+key itself is read for nothing else and goes nowhere. With an `apiKeyHelper` in your
+settings the session runs on its key, which the second `claude` (reading no
+settings) would not: then the server is not asked.
 
 Those big bars are drawn in the terminal and in the desktop app's Code tab,
 with an empty row above them that keeps them apart from the transcript. A little status

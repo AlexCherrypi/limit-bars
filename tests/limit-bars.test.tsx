@@ -268,6 +268,17 @@ describe('limit-bars: the account and the server reading', () => {
     expect(lastEnv()).not.toHaveProperty('ANTHROPIC_API_KEY') // -p and the SDK take it as it is
   })
 
+  test('a session on an apiKeyHelper reads no limits from the server', async ($, on) => {
+    const { clock, seen } = world(on, [], { HOME })
+    on('settings.read', () => ({ value: { apiKeyHelper: '~/bin/anthropic-key.sh' } }) as never)
+    seen.server.current = meter(12, 34) // the claude.ai login's, which the session does not run on
+    login(seen, A)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(30 * 60_000)
+    expect(fetches(seen)).toHaveLength(0)
+    expect(status.current).toBeUndefined()
+  })
+
   test('under VS Code the key counts only once approved, as in the terminal', async ($, on) => {
     const { clock, seen } = world(on, LIMITS, { HOME, ANTHROPIC_API_KEY: KEY, CLAUDE_CODE_ENTRYPOINT: 'claude-vscode' })
     seen.server.current = meter(12, 34)
