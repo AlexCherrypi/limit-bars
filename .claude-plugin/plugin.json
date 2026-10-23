@@ -1,7 +1,7 @@
 {
   "name": "limit-bars",
-  "version": "0.3.2",
-  "description": "Shows the 5-hour and 7-day rate limits live as two bars above the prompt, with each window's reset time on the right.",
+  "version": "0.4.0",
+  "description": "Shows the 5-hour and 7-day rate limits live as two bars above the prompt, with each window's reset time on the right; after an account switch at once the new account's.",
   "author": {
     "name": "AlexCherrypi"
   },
@@ -17,6 +17,18 @@
         "both"
       ],
       "default": "auto"
+    },
+    "reading": {
+      "type": "string",
+      "title": "Server reading",
+      "description": "While no response brings new figures (the session is idle), every how many minutes the bars ask the server for the account's usage: a short second claude, no model request, no tokens. off = only right after an account switch.",
+      "options": [
+        "5",
+        "15",
+        "30",
+        "off"
+      ],
+      "default": "5"
     }
   }
 }

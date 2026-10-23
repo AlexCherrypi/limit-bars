@@ -10,9 +10,27 @@ the time left in brackets:
 7d ███████████████████████░░░░░░░░░░░░░░  63% Mi 14.10. 02:00 (5d 14h)
 ```
 
-The figures come from the session itself (`session.measure`), so they move
-whenever a response reports new limits; a minute tick keeps the countdown going
-and drops a window to 0 % once its reset time has passed.
+The figures come from two places, and per window the newer one counts:
+
+- **the session itself** (`session.measure`): every response reports the limits,
+  so while the model works the bars move with each one;
+- **the server**: while no response comes (the session is idle), every 5 minutes
+  the bars read the account's usage meter through a short second `claude` (the
+  SDK's `get_usage` request, the fetch `/usage` does: no model request, no tokens,
+  about 3 s). So usage from other sessions and devices shows as well.
+
+**After an account switch** (a `/login` to another account, an account switcher)
+the bars show the new account's figures at once: every 2 seconds they look at
+`oauthAccount.accountUuid` in `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json`
+where that is set; a `stat`, read only when it changed). On a switch the old
+account's figures go and the new one's are read from the server right away;
+until they or the next response arrive, the bars stay empty rather than show the
+wrong account. A file that is half written or gone for a moment is no switch, a
+reading the account changed under is dropped, and without a claude.ai login (API
+key, cloud provider) the server is never asked. An answer from the engine's cache
+counts as no reading, and a failed one backs off (5 minutes, doubling up to an
+hour). A minute tick keeps the countdown going and drops a window to 0 % once its
+reset time has passed.
 
 Those big bars are drawn in the terminal and in the desktop app's Code tab,
 with an empty row above them that keeps them apart from the transcript. A little status
@@ -30,6 +48,9 @@ The `display` option (in `/plugin` → limit-bars → configure) picks which one
 | `big` | only the big bars |
 | `little` | only the little line |
 | `both` | both, e.g. for a terminal session you also follow remotely |
+
+The `reading` option says how often the server is asked while the session is idle:
+`5` (default), `15` or `30` minutes, or `off` (only right after an account switch).
 
 ## Install
 

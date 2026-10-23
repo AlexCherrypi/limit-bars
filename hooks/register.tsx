@@ -2,7 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
-// The latest figures and the time they were drawn for; a change redraws the band.
+// What the bars show and the time they were drawn for; a change redraws the band.
 let limits: Limit[] = []
 let now = 0
 
@@ -146,34 +146,301 @@ async function refreshStatus($: EngineInterface): Promise<void> {
   $.ui.status(text)
 }
 
-async function refresh($: EngineInterface, list?: Limit[]): Promise<void> {
+async function refresh($: EngineInterface): Promise<void> {
   now = await $.clock.now()
-  if (list) limits = list
+  limits = shown()
   $.ui.invalidate('ui.render')
   await refreshStatus($)
 }
 
+// ---------------------------------------------------------------- Readings
+//
+// The host fills the rate limits only from the headers of model responses: while
+// the session is idle they stand still, usage elsewhere on the account stays
+// unseen, and after a switch to another account (a /login, an account switcher)
+// they are the old account's until the next response. So the bars also read the
+// account's usage meter through a second, short-lived `claude` (the SDK's
+// get_usage request, the fetch /usage does: no model request, no tokens, about
+// 3 s), and they watch ~/.claude.json for the account, so right after a switch
+// they show the new one's figures.
+//
+// No hook ever waits for a reading. A hook's budget clock stops only for its own
+// $ calls, so waiting for a child process the timer started spends it, and two
+// overruns in a row get the hooks worker replaced. The watch timer takes every
+// reading.
+
+const WATCH_MS = 2_000 // how often ~/.claude.json is looked at (a stat; read only when it changed)
+const USAGE_TIMEOUT_MS = 10_000
+const USAGE_MIN_GAP_MS = 10_000 // between two readings, also when the account flips back and forth
+const USAGE_MAX_AGE_MS = 10 * 60_000 // an answer older than this is the engine's cache
+const USAGE_SNAPSHOT_MS = 60_000 // the engine answers get_usage from a snapshot up to this old, as fresh
+const USAGE_BACKOFF_MS = 5 * 60_000 // after a failed reading, doubling each time
+const USAGE_BACKOFF_MAX_MS = 60 * 60_000
+// Set in the second claude's environment: a limit-bars loaded there stays still.
+const CHILD_MARKER = 'LIMIT_BARS_CHILD'
+
+// The `reading` option: how often the server is asked while no response brings
+// new figures; off = only right after an account switch.
+const READINGS: Record<string, number> = { '5': 5 * 60_000, '15': 15 * 60_000, '30': 30 * 60_000, off: 0 }
+let readEvery = READINGS['5']!
+
+// The host's own figures, from the last response that moved them.
+let own: Limit[] = []
+let lastResponseAt = Number.NEGATIVE_INFINITY
+// The signed-in account as ~/.claude.json names it: undefined until it could be
+// read, null when it names none (no claude.ai login).
+let account: string | null | undefined
+let accountSwitchedAt = Number.NEGATIVE_INFINITY
+// A switch whose new account has no reading yet.
+let switchPending = false
+let accountPath: string | null | undefined
+let fileStamp: string | null = null
+let reading: { at: number; account: string | null | undefined; limits: Limit[] } | null = null
+let lastTryAt = Number.NEGATIVE_INFINITY
+let failures = 0
+let backoffUntil = 0
+let ticking = false
+let timers: { cancel: () => void }[] = []
+
+// Per window the newest figures: the server's for this account when they are newer than
+// the last response (a snapshot can be up to USAGE_SNAPSHOT_MS old), else the host's,
+// which come with every response; either fills in what the other leaves out. After a
+// switch the host's belong to the old account until the next response, so they wait.
+function shown(): Limit[] {
+  const out = accountSwitchedAt > lastResponseAt ? [] : own.map(l => ({ ...l }))
+  const r = reading
+  if (!r || r.account !== account) return out
+  const isNewer = r.at - USAGE_SNAPSHOT_MS > lastResponseAt
+  for (const l of r.limits) {
+    const i = out.findIndex(x => x.kind === l.kind)
+    if (i < 0) out.push({ ...l })
+    else if (isNewer) out[i] = { ...l }
+  }
+  return out
+}
+
+// $CLAUDE_CONFIG_DIR/.claude.json, else the home folder's.
+async function accountFile($: EngineInterface): Promise<string | null> {
+  if (accountPath !== undefined) return accountPath
+  const dir =
+    (await safe(() => $.env.get('CLAUDE_CONFIG_DIR'))) ||
+    (await safe(() => $.env.get('HOME'))) ||
+    (await safe(() => $.env.get('USERPROFILE')))
+  accountPath = dir ? `${dir.replace(/[\\/]+$/, '')}/.claude.json` : null
+  return accountPath
+}
+
+// The account in the file, read again only when its stat changed (the engine rewrites
+// it often); undefined when it cannot be read just now (missing, half written, over
+// $.fs.read's 4 MiB): that is no switch.
+async function readAccount($: EngineInterface): Promise<string | null | undefined> {
+  const path = await accountFile($)
+  if (!path) return undefined
+  const st = await safe(() => $.fs.stat(path))
+  if (!st) return undefined
+  const stamp = `${st.mtimeMs}:${st.size}`
+  if (stamp === fileStamp && account !== undefined) return account
+  const text = await safe(() => $.fs.read(path))
+  if (typeof text !== 'string') return undefined
+  try {
+    const id = JSON.parse(text)?.oauthAccount?.accountUuid
+    fileStamp = stamp
+    return typeof id === 'string' && id ? id : null
+  } catch {
+    return undefined
+  }
+}
+
+// True when the account changed since the last look.
+async function checkAccount($: EngineInterface): Promise<boolean> {
+  const seen = await readAccount($)
+  if (seen === undefined) return false
+  const before = account
+  account = seen
+  if (before === undefined || before === seen) return false
+  accountSwitchedAt = await $.clock.now()
+  switchPending = seen !== null
+  failures = 0
+  backoffUntil = 0
+  return true
+}
+
+// An ISO time or epoch seconds / milliseconds -> ms; null when it is none.
+function parseTime(v: unknown): number | null {
+  const ms = typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : typeof v === 'string' ? Date.parse(v) : Number.NaN
+  return Number.isFinite(ms) ? ms : null
+}
+
+type UsageAnswer = { limits: Limit[] } | { error: string; final?: boolean }
+
+// control_response.response.response.rate_limits.five_hour|seven_day = { utilization
+// (a percentage), resets_at }. An answer from the engine's cache (its fetch failed, e.g.
+// 429) has no rate_limits.limits[], and seven_day_breakdown.as_of is the server time of
+// the body: both are checked, or old figures would pass as fresh. rate_limits_available
+// false is a login without rate limits; rate_limits null beside it true is a fetch that
+// failed with nothing cached (429, network).
+function parseUsage(stdout: string, at: number): UsageAnswer {
+  for (const line of stdout.split('\n')) {
+    if (!line.includes('"control_response"')) continue
+    let res: Record<string, any> | undefined
+    try {
+      res = JSON.parse(line)?.response
+    } catch {
+      continue
+    }
+    if (res?.subtype === 'error') return { error: String(res.error ?? 'the request failed') }
+    const body = res?.response
+    if (!body || typeof body !== 'object') continue
+    if (body.rate_limits_available === false) return { error: 'this login has no rate limits', final: true }
+    const rl = body.rate_limits
+    if (!rl || typeof rl !== 'object') return { error: 'the server was not reached, and nothing was cached' }
+    const asOf = parseTime(rl.seven_day_breakdown?.as_of)
+    if (!Array.isArray(rl.limits) || (asOf !== null && at - asOf > USAGE_MAX_AGE_MS)) {
+      return { error: 'only a cached answer, the server was not reached' }
+    }
+    const out: Limit[] = []
+    for (const w of WINDOWS) {
+      const x = rl[w.kind]
+      if (!x || typeof x.utilization !== 'number' || !Number.isFinite(x.utilization)) continue
+      const reset = parseTime(x.resets_at)
+      out.push({ kind: w.kind, percentUsed: x.utilization, ...(reset !== null ? { resetsAt: new Date(reset).toISOString() } : {}) })
+    }
+    return out.length > 0 ? { limits: out } : { error: 'no 5-hour or 7-day limit in the answer' }
+  }
+  return { error: 'no answer' }
+}
+
+async function fetchUsage($: EngineInterface): Promise<UsageAnswer> {
+  const exe = (await safe(() => $.env.get('CLAUDE_CODE_EXECPATH'))) || 'claude'
+  try {
+    const r = await $.process.run(
+      [
+        exe, '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+        '--no-session-persistence', '--strict-mcp-config',
+        '--setting-sources', '', // no settings: no plugins or hooks of the person's or the project's
+      ],
+      {
+        stdin: `${JSON.stringify({ type: 'control_request', request_id: 'limit-bars', request: { subtype: 'get_usage', skip_behaviors: true } })}\n`,
+        // Set, the fetch fails silently and the answer falls back to the cache.
+        env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '', CLAUDE_CODE_PLUGIN_DIRS: '', [CHILD_MARKER]: '1' },
+        timeoutMs: USAGE_TIMEOUT_MS,
+      },
+    )
+    const answer = parseUsage(r.stdout, await $.clock.now())
+    return 'error' in answer && answer.error === 'no answer' && r.exitCode !== 0
+      ? { error: `the second claude exited with ${r.exitCode}` }
+      : answer
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+// When the newest figures at hand came: the server's for this account, or the last
+// response's, unless that one was before a switch.
+function newestAt(): number {
+  const r = reading && reading.account === account ? reading.at : Number.NEGATIVE_INFINITY
+  return Math.max(r, accountSwitchedAt > lastResponseAt ? Number.NEGATIVE_INFINITY : lastResponseAt)
+}
+
+function isReadingDue(at: number): boolean {
+  if (account === null || at < backoffUntil || at - lastTryAt < USAGE_MIN_GAP_MS) return false
+  if (switchPending) return true
+  return readEvery > 0 && at - newestAt() >= readEvery
+}
+
+async function takeReading($: EngineInterface): Promise<void> {
+  const asked = await $.clock.now()
+  lastTryAt = asked
+  const forAccount = account
+  const r = await fetchUsage($)
+  // An answer that may be the account's before a switch is dropped; the switch reads again.
+  if ((await checkAccount($)) || account !== forAccount) return
+  switchPending = false
+  if ('limits' in r) {
+    // Dated when it was asked for: it may come from a snapshot taken a little before.
+    reading = { at: asked, account: forAccount, limits: r.limits }
+    failures = 0
+    backoffUntil = 0
+    return
+  }
+  failures += 1
+  const wait = r.final ? USAGE_BACKOFF_MAX_MS : Math.min(USAGE_BACKOFF_MAX_MS, USAGE_BACKOFF_MS * 2 ** (failures - 1))
+  backoffUntil = (await $.clock.now()) + wait
+}
+
+// The watch: a look at the account file, a reading when one is due, then the bars.
+async function watchTick($: EngineInterface): Promise<void> {
+  if (ticking) return
+  ticking = true
+  try {
+    const switched = await checkAccount($)
+    const had = reading
+    if (isReadingDue(await $.clock.now())) await takeReading($)
+    if (switched || reading !== had) await refresh($)
+  } catch {
+    // the next look tries again
+  } finally {
+    ticking = false
+  }
+}
+
 export const register: Register = (on, options) => {
   display = DISPLAYS.find(d => d === options.display) ?? 'auto'
+  readEvery = READINGS[String(options.reading)] ?? READINGS['5']!
   isBandShown = false
   lastStatus = undefined
   limits = []
   now = 0
+  own = []
+  lastResponseAt = Number.NEGATIVE_INFINITY
+  account = undefined
+  accountSwitchedAt = Number.NEGATIVE_INFINITY
+  switchPending = false
+  accountPath = undefined
+  fileStamp = null
+  reading = null
+  lastTryAt = Number.NEGATIVE_INFINITY
+  failures = 0
+  backoffUntil = 0
+  ticking = false
+  timers = []
 
   on('session.start', async ($, e, next) => {
+    for (const t of timers) t.cancel()
+    timers = []
+    if ((await safe(() => $.env.get('LIMIT_BARS_CHILD'))) !== undefined) return next(e)
     timeZone = await detectTimeZone($)
     const u = await safe(() => $.session.usage())
-    await refresh($, u?.rateLimits.map(r => ({ ...r })))
+    own = u?.rateLimits.map(r => ({ ...r })) ?? []
+    await refresh($)
     // A minute tick moves the countdown and drops a window past its reset.
-    $.clock.every(60_000, () => refresh($))
+    timers.push($.clock.every(60_000, () => void refresh($)))
+    timers.push($.clock.every(WATCH_MS, () => void watchTick($)))
+    timers.push($.clock.after(0, () => void watchTick($)))
     return next(e)
   })
 
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('rateLimits')) {
-      await refresh($, e.rateLimits.map(r => ({ ...r })))
+      own = e.rateLimits.map(r => ({ ...r }))
+      await refresh($)
     }
     return next(e)
+  })
+
+  // A response came: the host's figures are from now, and after a switch they are the new account's.
+  on('turn.step', async function* ($, e, next) {
+    const r = yield* next(e)
+    if (r.stopReason !== null) {
+      const isFirstAfterSwitch = accountSwitchedAt > lastResponseAt
+      lastResponseAt = await $.clock.now()
+      if (isFirstAfterSwitch) {
+        const u = await safe(() => $.session.usage())
+        if (u) own = u.rateLimits.map(l => ({ ...l }))
+        await refresh($)
+      }
+    }
+    return r
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
