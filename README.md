@@ -37,6 +37,14 @@ engine's cache counts as no reading, and a failed one backs off (5 minutes,
 doubling up to an hour; a login without rate limits an hour). A minute tick keeps
 the countdown going and drops a window to 0 % once its reset time has passed.
 
+`claude -p` takes an `ANTHROPIC_API_KEY` from the environment over the claude.ai
+login, so where the session itself does not run on that key the second `claude`
+gets it empty. Claude Code takes the key in a session with you at the prompt
+(terminal, VS Code) only once you approved it, and in `-p` and the SDK as it is.
+limit-bars tells which by the key's last 20 characters against
+`customApiKeyResponses.approved` in `~/.claude.json`, the way Claude Code does; the
+key itself is read for nothing else and goes nowhere.
+
 Those big bars are drawn in the terminal and in the desktop app's Code tab,
 with an empty row above them that keeps them apart from the transcript. A little status
 line under the prompt shows the same figures in one row:

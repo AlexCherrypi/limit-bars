@@ -196,6 +196,10 @@ let accountSwitchedAt = Number.NEGATIVE_INFINITY
 let switchPending = false
 let accountPath: string | null | undefined
 let fileStamp: string | null = null
+// The last 20 characters of each API key the person let a session use, as the file keeps
+// them (customApiKeyResponses.approved); undefined until it could be read.
+let approvedKeys: readonly string[] | undefined
+let interactive = false // a person is at the prompt (session.start says)
 let reading: { at: number; account: string | null | undefined; limits: Limit[] } | null = null
 let lastTryAt = Number.NEGATIVE_INFINITY
 let failures = 0
@@ -245,7 +249,10 @@ async function readAccount($: EngineInterface): Promise<string | null | undefine
   const text = await safe(() => $.fs.read(path))
   if (typeof text !== 'string') return undefined
   try {
-    const id = JSON.parse(text)?.oauthAccount?.accountUuid
+    const config = JSON.parse(text)
+    const id = config?.oauthAccount?.accountUuid
+    const approved = config?.customApiKeyResponses?.approved
+    approvedKeys = Array.isArray(approved) ? approved.filter((k): k is string => typeof k === 'string') : []
     fileStamp = stamp
     return typeof id === 'string' && id ? id : null
   } catch {
@@ -312,8 +319,20 @@ function parseUsage(stdout: string, at: number): UsageAnswer {
   return { error: 'no answer' }
 }
 
+// Whether the session itself runs on the API key in the environment, which the host
+// picks this way: -p and the SDK take it as it is (not under VS Code), a session with a
+// person at the prompt only once they let it. Not read yet, as if they did.
+async function sessionUsesKey($: EngineInterface, key: string): Promise<boolean> {
+  if (!interactive && (await safe(() => $.env.get('CLAUDE_CODE_ENTRYPOINT'))) !== 'claude-vscode') return true
+  return approvedKeys === undefined || approvedKeys.includes(key.slice(-20))
+}
+
 async function fetchUsage($: EngineInterface): Promise<UsageAnswer> {
   const exe = (await safe(() => $.env.get('CLAUDE_CODE_EXECPATH'))) || 'claude'
+  // -p would take a key from the environment over the claude.ai login the session runs
+  // on, and answer that there are no rate limits.
+  const key = (await safe(() => $.env.get('ANTHROPIC_API_KEY')))?.trim()
+  const dropKey = !!key && !(await sessionUsesKey($, key))
   try {
     const r = await $.process.run(
       [
@@ -326,10 +345,7 @@ async function fetchUsage($: EngineInterface): Promise<UsageAnswer> {
         env: {
           // Set, the fetch fails silently and the answer falls back to the cache.
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '',
-          // Without a prompt to decline it, -p would take a key from the environment
-          // over the claude.ai login and answer that it has no rate limits.
-          ANTHROPIC_API_KEY: '',
-          ANTHROPIC_AUTH_TOKEN: '',
+          ...(dropKey ? { ANTHROPIC_API_KEY: '' } : {}),
           CLAUDE_CODE_PLUGIN_DIRS: '',
           [CHILD_MARKER]: '1',
         },
@@ -421,6 +437,8 @@ export const register: Register = (on, options) => {
   switchPending = false
   accountPath = undefined
   fileStamp = null
+  approvedKeys = undefined
+  interactive = false
   reading = null
   lastTryAt = Number.NEGATIVE_INFINITY
   failures = 0
@@ -432,6 +450,7 @@ export const register: Register = (on, options) => {
     for (const t of timers) t.cancel()
     timers = []
     if ((await safe(() => $.env.get('LIMIT_BARS_CHILD'))) !== undefined) return next(e)
+    interactive = e.isInteractive === true
     timeZone = await detectTimeZone($)
     const u = await safe(() => $.session.usage())
     own = u?.rateLimits.map(r => ({ ...r })) ?? []

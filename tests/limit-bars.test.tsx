@@ -236,9 +236,47 @@ describe('limit-bars: the account and the server reading', () => {
     ])
     expect(run.init.env?.LIMIT_BARS_CHILD).toBe('1')
     expect(run.init.env?.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('')
-    // A key in the environment would win over the login in -p, which has no rate limits.
-    expect(run.init.env?.ANTHROPIC_API_KEY).toBe('')
-    expect(run.init.env?.ANTHROPIC_AUTH_TOKEN).toBe('')
+    // No key in the environment: nothing to leave out. A token the session runs on, as the child does.
+    expect(run.init.env).not.toHaveProperty('ANTHROPIC_API_KEY')
+    expect(run.init.env).not.toHaveProperty('ANTHROPIC_AUTH_TOKEN')
+  })
+
+  const KEY = 'sk-ant-api03-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbb'
+  const withKeys = (seen: ReturnType<typeof world>['seen'], approved: string[], rejected: string[]) =>
+    login(seen, A, JSON.stringify({ oauthAccount: { accountUuid: A }, customApiKeyResponses: { approved, rejected } }))
+
+  test('the second claude leaves out an API key the session does not run on', LONG, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME, ANTHROPIC_API_KEY: KEY })
+    seen.server.current = meter(12, 34)
+    const lastEnv = () => fetches(seen).at(-1)!.init.env
+    withKeys(seen, [], [KEY.slice(-20)])
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true } as never)
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1)
+    // Declined at the prompt: the session runs on the claude.ai login, which -p would pass over.
+    expect(lastEnv()?.ANTHROPIC_API_KEY).toBe('')
+
+    withKeys(seen, [KEY.slice(-20)], [])
+    await clock.advance(5 * 60_000)
+    expect(fetches(seen)).toHaveLength(2)
+    expect(lastEnv()).not.toHaveProperty('ANTHROPIC_API_KEY') // approved: the session runs on the key
+
+    withKeys(seen, [], [])
+    await $.session.start({ cwd: '/', surface: null, isInteractive: false } as never)
+    await clock.advance(5 * 60_000)
+    expect(fetches(seen)).toHaveLength(3)
+    expect(lastEnv()).not.toHaveProperty('ANTHROPIC_API_KEY') // -p and the SDK take it as it is
+  })
+
+  test('under VS Code the key counts only once approved, as in the terminal', async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME, ANTHROPIC_API_KEY: KEY, CLAUDE_CODE_ENTRYPOINT: 'claude-vscode' })
+    seen.server.current = meter(12, 34)
+    withKeys(seen, [], [])
+    await $.session.start({ cwd: '/', surface: null, isInteractive: false } as never)
+    seen.surfaces.current = ['vscode']
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1)
+    expect(fetches(seen)[0]!.init.env?.ANTHROPIC_API_KEY).toBe('')
   })
 
   test('the old account\'s figures go, also when the new one has none yet', OFF, async ($, on) => {
