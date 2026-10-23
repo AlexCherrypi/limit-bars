@@ -412,6 +412,71 @@ describe('limit-bars: the account and the server reading', () => {
     expect(status.current).toContain('5h ▰▱▱▱▱▱▱▱ 14%')
   })
 
+  test('while a request from before the switch is out, no response brings figures for the new account', { ...OFF, ...LONG }, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    const measure = (percentUsed: number) =>
+      $.session.measure({
+        context: { window: 1_000_000 },
+        rateLimits: [{ ...LIMITS[0]!, percentUsed }, LIMITS[1]!],
+        changed: ['rateLimits'],
+      } as never)
+    login(seen, A)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    seen.stepMs.current = 20_000
+    const a = respond($) // a subagent's request under A
+    await clock.advance(2_000)
+    login(seen, B) // the second claude fails
+    await clock.advance(2_000)
+    expect(status.current ?? '').not.toContain('41%')
+
+    seen.stepMs.current = 2_000
+    seen.own.current = [{ ...LIMITS[0]!, percentUsed: 14 }, LIMITS[1]!]
+    const b = respond($) // under B, while A's is out
+    await clock.advance(2_000)
+    await b
+    await measure(41) // A's headers come in after it
+    expect(status.current ?? '').not.toContain('41%')
+    await clock.advance(14_000)
+    await a
+    expect(status.current ?? '').not.toContain('41%')
+
+    // A request from before the switch comes back while a new one is out.
+    seen.stepMs.current = 10_000
+    const c = respond($) // under B
+    await clock.advance(2_000)
+    login(seen, A)
+    await clock.advance(2_000)
+    seen.stepMs.current = 20_000
+    const d = respond($) // under A again
+    await clock.advance(6_000)
+    await c
+    seen.own.current = [{ ...LIMITS[0]!, percentUsed: 14 }, LIMITS[1]!] // c's headers: B's
+    await clock.advance(14_000)
+    await d
+    expect(status.current ?? '').not.toContain('14%')
+
+    seen.stepMs.current = 0
+    seen.own.current = [{ ...LIMITS[0]!, percentUsed: 42 }, LIMITS[1]!]
+    await respond($) // nothing from before the switch is out any more
+    expect(status.current).toContain('42%')
+  })
+
+  test('a response after a switch ends the retries for the new account', OFF, async ($, on) => {
+    const { clock, seen } = world(on, LIMITS, { HOME })
+    login(seen, A)
+    await $.session.start({ cwd: '/' } as never)
+    await clock.advance(2_000)
+    login(seen, B) // the second claude fails
+    await clock.advance(2_000)
+    expect(fetches(seen)).toHaveLength(1)
+    seen.own.current = [{ ...LIMITS[0]!, percentUsed: 14 }, LIMITS[1]!]
+    await respond($)
+    expect(status.current).toContain('14%')
+    await clock.advance(2 * 60 * 60_000)
+    expect(fetches(seen)).toHaveLength(1) // reading is off: no more readings
+  })
+
   test('a step without a response after a switch keeps the old figures away', OFF, async ($, on) => {
     const { clock, seen } = world(on, LIMITS, { HOME })
     login(seen, A)

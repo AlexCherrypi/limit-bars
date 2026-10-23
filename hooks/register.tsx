@@ -200,6 +200,8 @@ let fileStamp: string | null = null
 // them (customApiKeyResponses.approved); undefined until it could be read.
 let approvedKeys: readonly string[] | undefined
 let interactive = false // a person is at the prompt (session.start says)
+let stepsOut = new Map<object, number>() // the model requests out now, each with when it went out
+let oldStepBackAt = Number.NEGATIVE_INFINITY // when the last one sent before the switch came back
 let reading: { at: number; account: string | null | undefined; limits: Limit[] } | null = null
 let lastTryAt = Number.NEGATIVE_INFINITY
 let failures = 0
@@ -361,6 +363,16 @@ async function fetchUsage($: EngineInterface): Promise<UsageAnswer> {
   }
 }
 
+// Whether the host's figures are the account's since the last switch once the response to
+// a request sent at `sentAt` came: the request went out after the switch, and none sent
+// before it came back since or is still out – its headers, under the old account, would
+// put that one's figures back.
+function isNewAccount(sentAt: number): boolean {
+  if (sentAt < accountSwitchedAt || sentAt < oldStepBackAt) return false
+  for (const s of stepsOut.values()) if (s < accountSwitchedAt) return false
+  return true
+}
+
 // When the newest figures at hand came: the server's for this account, or the last
 // response's, unless that one was before a switch.
 function newestAt(): number {
@@ -439,6 +451,8 @@ export const register: Register = (on, options) => {
   fileStamp = null
   approvedKeys = undefined
   interactive = false
+  stepsOut = new Map()
+  oldStepBackAt = Number.NEGATIVE_INFINITY
   reading = null
   lastTryAt = Number.NEGATIVE_INFINITY
   failures = 0
@@ -471,22 +485,29 @@ export const register: Register = (on, options) => {
   })
 
   // A response came: the host's figures are from now, and after a switch they are the new
-  // account's. A request sent before the switch went out under the old account, so its
-  // response leaves the figures as they are.
+  // account's – unless they may still be the old one's (isNewAccount).
   on('turn.step', async function* ($, e, next) {
     const sentAt = await $.clock.now()
-    const r = yield* next(e)
-    if (r.stopReason !== null && sentAt >= accountSwitchedAt) {
-      const isFirstAfterSwitch = accountSwitchedAt > lastResponseAt
-      lastResponseAt = await $.clock.now()
-      if (isFirstAfterSwitch) {
-        const u = await safe(() => $.session.usage())
-        if (u) own = u.rateLimits.map(l => ({ ...l }))
+    const step = {}
+    stepsOut.set(step, sentAt)
+    try {
+      const r = yield* next(e)
+      if (r.stopReason !== null && isNewAccount(sentAt)) {
+        const isFirstAfterSwitch = accountSwitchedAt > lastResponseAt
+        lastResponseAt = await $.clock.now()
+        if (isFirstAfterSwitch) {
+          switchPending = false // the new account's figures are in
+          const u = await safe(() => $.session.usage())
+          if (u) own = u.rateLimits.map(l => ({ ...l }))
+        }
+        // An older server reading may have counted over them until now.
+        await refresh($)
       }
-      // An older server reading may have counted over them until now.
-      await refresh($)
+      return r
+    } finally {
+      stepsOut.delete(step)
+      if (sentAt < accountSwitchedAt) oldStepBackAt = await $.clock.now()
     }
-    return r
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
